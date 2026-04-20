@@ -1,16 +1,18 @@
 "use server";
 
-import bcrypt from "bcryptjs";
-import crypto from "node:crypto";
 import { redirect } from "next/navigation";
 
 import { clearSession, createSession, requireUser } from "@/lib/auth";
 import {
-  createUser,
   findUserByEmail,
   findUserBySlug,
-  updateUser,
+  updateUserProfile,
+  type UserProfile,
 } from "@/lib/user-store";
+import {
+  createSupabaseAdminClient,
+  createSupabaseServerClient,
+} from "@/lib/supabase";
 import { normalizeOptionalText, normalizeOptionalUrl, slugify } from "@/lib/utils";
 
 export type FormState = {
@@ -53,15 +55,10 @@ export async function signUpAction(_: FormState, formData: FormData): Promise<Fo
     return { error: "That email is already registered. Please sign in instead." };
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
   const slug = await createUniqueSlug(fullName);
-
-  const user = await createUser({
-    id: crypto.randomUUID(),
-    email,
-    passwordHash,
-    slug,
+  const profile: UserProfile = {
     fullName,
+    slug,
     photoUrl: null,
     phone: null,
     address: null,
@@ -73,9 +70,25 @@ export async function signUpAction(_: FormState, formData: FormData): Promise<Fo
     whatsapp: null,
     tiktok: null,
     website: null,
+  };
+  const supabase = createSupabaseAdminClient();
+  const { data, error } = await supabase.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: {
+      ...profile,
+      updatedAt: new Date().toISOString(),
+    },
   });
 
-  await createSession(user.id);
+  if (error || !data.user) {
+    return {
+      error: error?.message ?? "We could not create your account right now.",
+    };
+  }
+
+  await createSession(data.user.id);
   redirect("/dashboard");
 }
 
@@ -87,19 +100,17 @@ export async function signInAction(_: FormState, formData: FormData): Promise<Fo
     return { error: "Please enter your email and password." };
   }
 
-  const user = await findUserByEmail(email);
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 
-  if (!user) {
-    return { error: "No account was found for that email." };
+  if (error || !data.user) {
+    return { error: "Incorrect email or password. Please try again." };
   }
 
-  const isValid = await bcrypt.compare(password, user.passwordHash);
-
-  if (!isValid) {
-    return { error: "Incorrect password. Please try again." };
-  }
-
-  await createSession(user.id);
+  await createSession(data.user.id);
   redirect("/dashboard");
 }
 
@@ -132,7 +143,7 @@ export async function saveProfileAction(
     return { error: "That share link is already taken. Please choose another one." };
   }
 
-  await updateUser(user.id, {
+  const profile: UserProfile = {
     fullName,
     slug,
     photoUrl: normalizeOptionalUrl(formData.get("photoUrl")),
@@ -146,7 +157,9 @@ export async function saveProfileAction(
     whatsapp: normalizeOptionalUrl(formData.get("whatsapp")),
     tiktok: normalizeOptionalUrl(formData.get("tiktok")),
     website: normalizeOptionalUrl(formData.get("website")),
-  });
+  };
+
+  await updateUserProfile(user.id, profile);
 
   return { success: "Profile updated. Your share link is ready to send." };
 }
